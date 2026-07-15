@@ -1,151 +1,76 @@
 import streamlit as st
-import pandas as pd
-import math
-from pathlib import Path
+from huggingface_hub import hf_hub_download
+from llama_cpp import Llama
+import os
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# Путь для сохранения модели (будет создана при первом запуске)
+MODEL_DIR = "./models"
+os.makedirs(MODEL_DIR, exist_ok=True)
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
-
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
-
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
-
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
-
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
+# Кэшируем загрузку модели, чтобы не перекачивать при каждом обновлении страницы
+@st.cache_resource
+def load_model():
+    # Скачиваем GGUF-файл с Hugging Face (если ещё не скачан)
+    model_path = hf_hub_download(
+        repo_id="Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+        filename="qwen2.5-0.5b-instruct-q4_k_m.gguf",  # 4‑битная квантизация
+        local_dir=MODEL_DIR,
+        local_dir_use_symlinks=False,
     )
+    # Загружаем модель в память
+    llm = Llama(
+        model_path=model_path,
+        n_ctx=1024,           # длина контекста
+        n_threads=2,          # используем 2 ядра CPU
+        n_gpu_layers=0,       # 0 = только CPU
+        verbose=False,
+    )
+    return llm
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+# Загружаем модель (один раз)
+llm = load_model()
 
-    return gdp_df
+# Интерфейс чата
+st.set_page_config(page_title="Мини-чат", page_icon="🤖")
+st.title("🤖 Мини-чат с Qwen 0.5B")
 
-gdp_df = get_gdp_data()
+# Инициализация истории сообщений
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "assistant", "content": "Привет! Я маленькая LLM. Задай мне вопрос."}]
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+# Отображаем все сообщения
+for msg in st.session_state.messages:
+    st.chat_message(msg["role"]).write(msg["content"])
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+# Поле ввода
+if prompt := st.chat_input("Ваш вопрос..."):
+    # Добавляем сообщение пользователя
+    st.chat_message("user").write(prompt)
+    st.session_state.messages.append({"role": "user", "content": prompt})
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+    # Генерируем ответ
+    with st.spinner("Думаю..."):
+        # Формируем промпт для instruct-модели
+        # Qwen2.5 использует шаблон: <|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n
+        full_prompt = ""
+        for m in st.session_state.messages:
+            if m["role"] == "user":
+                full_prompt += f"<|im_start|>user\n{m['content']}<|im_end|>\n"
+            elif m["role"] == "assistant":
+                full_prompt += f"<|im_start|>assistant\n{m['content']}<|im_end|>\n"
+        full_prompt += "<|im_start|>assistant\n"
 
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
+        # Генерация
+        response = llm(
+            full_prompt,
+            max_tokens=256,
+            temperature=0.7,
+            top_p=0.9,
+            echo=False,
+            stop=["<|im_end|>"],
         )
+        answer = response["choices"][0]["text"].strip()
+
+    # Добавляем ответ ассистента
+    st.chat_message("assistant").write(answer)
+    st.session_state.messages.append({"role": "assistant", "content": answer})

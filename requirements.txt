@@ -1,2 +1,4 @@
 streamlit
 pandas
+llama-cpp-python
+huggingface-hub
